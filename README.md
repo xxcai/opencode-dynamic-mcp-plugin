@@ -19,10 +19,9 @@ Agent ── skills-hub_prepare-skill ──────────────
                     ├─ client.mcp.add("skill-weather", {type:"remote",                     │
                     │    url:"http://127.0.0.1:<随机端口>/mcp/weather", oauth:false})       │
                     ├─ skills/sessions 表登记（易变状态全在插件内存）                        │
-                    └─ 改写工具返回为短确认（SKILL.md 改走 system prompt 注入）              │
+                    └─ 改写工具返回为原生同构 <skill_content> 块（SKILL.md 留在对话历史）    │
 Agent ── skill-weather_get_weather（下一步即可见）──► 插件内 Bun.serve（stateless 代理）────┘
                               │ callTool → hubInvoke() → hub 的 /exec 面绕回 invoke
-system prompt：experimental.chat.system.transform 按 session 注入 <skill_instructions>
 ```
 
 - **主 MCP（skills hub）**：无状态、双端点分面。`/mcp` 只挂 `list-skill`/`prepare-skill`；`/exec/mcp` 只挂 `invoke` → **invoke 结构性隐藏**（Agent 面根本不存在，不依赖任何客户端隐藏配置）。`prepare-skill` 一次性自包含返回 SKILL.md + MCP.JSON。
@@ -51,7 +50,7 @@ system prompt：experimental.chat.system.transform 按 session 注入 <skill_ins
 
 ```bash
 bun install
-bun test          # 15 个用例：hub 契约 / 插件 hooks / 桥接闭环
+bun test          # 14 个用例：hub 契约 / 插件 hooks / 桥接闭环
 ```
 
 注意：`demo/.opencode/package.json`（插件依赖声明）**不入库**——OpenCode 宿主会自己维护该目录的 `.gitignore` 并把它视为环境产物（首次运行会自动写入/补全）。全新 clone 后首次启动宿主前，需手工创建该文件：
@@ -104,7 +103,7 @@ cd demo && bun <OpenCode 源码>/packages/opencode/src/index.ts
 |---|---|---|
 | 插件文件格式 | **legacy 单函数导出**（唯一导出） | 1.2.27 遍历命名导出（`plugin/index.ts:84`）；1.19.5 `applyPlugin` 回退 `getLegacyPlugins`（`plugin/index.ts:114-125`） |
 | SDK 依赖 | 锁 **1.25.2** | `WebStandardStreamableHTTPServerTransport` 在 1.25.2 存在；两版宿主 client 与之协议兼容 |
-| Hooks | 只用两版都有的 `tool.execute.after` + `experimental.chat.system.transform`；额外携带 `dispose` | 1.19.5 触发清理、1.2.27 自然忽略（无此 hook 的多余 key 不触发不报错） |
+| Hooks | 只用两版都有的 `tool.execute.after`；额外携带 `dispose` | 1.19.5 触发清理、1.2.27 自然忽略（无此 hook 的多余 key 不触发不报错） |
 | `client.mcp.add` | 两版均为 `POST /mcp`；响应形状 optional chaining 防御解析 | 两版 sdk.gen 均核验 |
 
 若未来需要真分支：读宿主自动安装的 `@opencode-ai/plugin` 包 version（与宿主同版本号），或特性探测。
@@ -115,7 +114,7 @@ cd demo && bun <OpenCode 源码>/packages/opencode/src/index.ts
 2. **invoke 形态：分面端点（形态 2）**。`/mcp` 只挂 list+prepare，`/exec/mcp` 只挂 invoke：结构性隐藏 + 保留统一执行咽喉（治理/审计/热更新）。备选：形态 1（共端点 + permission deny，隐藏依赖客户端配置）；形态 3（无 invoke，prepare 返回执行坐标+令牌、代理直连实际执行 server——要求实际服务客户端可达、治理下沉）。三种形态下 OpenCode 侧插件架构完全不变。
 3. **session 级可见性（遗留项）**：v1.19.5 上已验证机制存在（session permission ruleset 可 API 写入、持久化、findLast 后写胜出），但受快照架构限制（prompt 循环只取一次 session 快照，after-hook 写入的 allow 对当前轮不生效）→「同轮可见 × 其他 session 严格不可见」不可兼得。三选一待定：A 严格隔离（两段式 UX）/ B 同轮可用 + before-hook 执行守卫 / C = A + 空闲自动续跑。**当前接受 instance 级可见**。
 4. **无状态鉴权/归因（预留）**：prepare-skill 返回短时令牌，代理 invoke 时附带（`context` 字段或 exec 连接 header），hub JWT 式校验仍无状态。POC 未实现，invoke 契约已预留 `context` 字段。
-5. **SKILL.md 不走工具返回**：after-hook 改写返回为短确认，SKILL.md 经 system.transform 注入（按 session、每请求现拼）——数据面与 Agent 可见面分离，同时截掉 Agent 不需要看的 mcpJson schema（工具注册后 schema 从正规 tools 数组获取，对话里那份纯属 token 冗余）。
+5. **SKILL.md 以原生同构形态经工具结果交付**：after-hook 把返回改写为 `<skill_content name="...">` 块（SKILL.md 全文 + 已挂载工具清单），留在对话历史——与 opencode 原生 `skill` 工具的输出形态一致（token 一次性支付、缓存友好、模型熟悉的 pattern）；mcpJson schema 仍不进对话（工具注册后 schema 从 tools 数组获取）。曾评估过「system prompt 注入」方案（每请求现拼、位置恒定），因与原生形态不一致及每请求重复成本弃用；「system 放已装配技能轻量清单」记为可选增强（对冲长对话沉底），未实现。
 6. **持久化**：`mcp.add` 内存态、重启即失（技能是会话级能力，可接受）。零配置接入可用插件 `config` hook 注入 hub 配置（未实现）。
 7. **stdio 代理变体（transport 层回退）**：`{type:"local", command:[bun, proxy-stdio.ts, skillId, execUrl]}`，每技能一子进程；仅当 HTTP 代理出现不可解的兼容问题时启用。
 
@@ -128,7 +127,7 @@ cd demo && bun <OpenCode 源码>/packages/opencode/src/index.ts
 
 ## 验证状态
 
-- [x] 单测 15/15（hub 契约 / 插件 hooks / 桥接闭环）——`bun test`
+- [x] 单测 14/14（hub 契约 / 插件 hooks / 桥接闭环）——`bun test`
 - [x] 集成测试（1.19.5 本地，2026-10-29 全项通过）：
   - [x] `opencode run "帮我查一下北京的天气"` → list-skill → prepare-skill → 下一步调用 `skill-weather_get_weather` → 回复"北京当前天气晴朗，气温 21°C"（SKILL.md 引导的一句话格式生效）
   - [x] hub 日志：`[hub] agent list-skill / [hub] agent prepare-skill / [hub] exec invoke`——**invoke 只来自 exec 面，Agent 从未直调**

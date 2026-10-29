@@ -5,14 +5,14 @@
  * 1. tool.execute.after 拦截主 MCP（skills-hub）prepare-skill 的返回
  *    → 解析 {ok, skillId, skillMd, mcpJson}（一次性自包含装配信息）
  *    → client.mcp.add 动态注册代理 MCP（instance 级、内存态、下一步对 LLM 可见）
- *    → 改写工具返回为短确认（SKILL.md 改走 system prompt 注入，mcpJson schema 不进对话）
+ *    → 改写工具返回为原生技能同构的 <skill_content> 块（SKILL.md 全文 + 已挂载工具清单，
+ *      留在对话历史；mcpJson schema 不进对话——工具注册后 schema 从 tools 数组获取）
  * 2. 代理 MCP（本进程内 Bun.serve，stateless Streamable HTTP）：listTools 原样透传 MCP.JSON
  *    的 JSON Schema；callTool 封装后经 hub 的 /exec 面绕回 invoke 元方法（Agent 不可见）
- * 3. experimental.chat.system.transform 按 session 注入 <skill_instructions>（SKILL.md）
  *
  * 兼容性（公共子集 + 优雅降级）：
  * - legacy 单函数导出格式（1.2.27 遍历命名导出；1.19.5 回退 getLegacyPlugins）→ 本文件只能有这一个导出
- * - 只用两版都有的 hooks；额外携带 dispose（1.19.5 触发清理，1.2.27 自然忽略）
+ * - 只用两版都有的 tool.execute.after；额外携带 dispose（1.19.5 触发清理，1.2.27 自然忽略）
  * - SDK 锁 1.25.2（见 .opencode/package.json）
  */
 
@@ -36,7 +36,6 @@ type ProxyTool = { name: string; description?: string; inputSchema: Record<strin
 
 // ---- 模块级内存态（随宿主实例生灭；mcp.add 同为内存态，重启即失，语义一致） ----
 const skills = new Map<string, { skillId: string; serverName: string; tools: ProxyTool[] }>()
-const sessions = new Map<string, Map<string, string>>() // sessionID → (skillId → skillMd)
 let execClient: MCPClient | undefined
 let proxy: ReturnType<typeof Bun.serve> | undefined
 
@@ -127,7 +126,6 @@ async function stopProxy() {
   proxy?.stop(true)
   proxy = undefined
   skills.clear()
-  sessions.clear()
   console.log("[dynamic-mcp] disposed")
 }
 
@@ -169,12 +167,6 @@ export const DynamicSkill = async (input: PluginInput): Promise<Hooks> => {
       try {
         if (!proxy) throw new Error("proxy server not running")
         skills.set(skillId, { skillId, serverName, tools: payload.mcpJson.tools })
-        let bySkill = sessions.get(hi.sessionID)
-        if (!bySkill) {
-          bySkill = new Map()
-          sessions.set(hi.sessionID, bySkill)
-        }
-        bySkill.set(skillId, String(payload.skillMd ?? ""))
         const res = await client.mcp.add({
           body: {
             name: serverName,
@@ -190,11 +182,24 @@ export const DynamicSkill = async (input: PluginInput): Promise<Hooks> => {
         // 两版宿主均返回扁平的 status record（1.19.5 实测、1.2.27 OpenAPI schema 一致），防御性兼容包裹形态
         const status = (res.data as any)?.[serverName]?.status ?? (res.data as any)?.status?.[serverName]?.status
         console.log(`[dynamic-mcp] registered ${serverName} status=${status ?? "?"} tools=[${toolNames.join(", ")}]`)
-        // 改写工具返回：数据面（hub→插件）与 Agent 可见面分离，SKILL.md/schema 不留在对话里
+        // 改写为原生技能同构形态：SKILL.md 全文 + 已挂载工具清单，作为工具结果留在对话历史
+        //（对齐 opencode 原生 skill 工具输出的 <skill_content> 块；schema 不进对话，由 tools 数组承载）
         result.content = [
           {
             type: "text",
-            text: `Skill "${skillId}" ready. Tools now available: ${toolNames.join(", ")}. Usage guidance was injected into your system prompt.`,
+            text: [
+              `<skill_content name="${skillId}">`,
+              `# Skill: ${skillId}`,
+              "",
+              String(payload.skillMd ?? "").trim(),
+              "",
+              "Skill tools are now mounted (call them directly):",
+              ...payload.mcpJson.tools.map(
+                (t) => `- \`${serverName}_${sanitize(t.name)}\`: ${t.description ?? ""}`,
+              ),
+              "",
+              "</skill_content>",
+            ].join("\n"),
           },
         ]
       } catch (e) {
@@ -205,15 +210,6 @@ export const DynamicSkill = async (input: PluginInput): Promise<Hooks> => {
             text: `[dynamic-mcp] failed to register skill "${skillId}": ${e instanceof Error ? e.message : String(e)}`,
           },
         ]
-      }
-    },
-
-    "experimental.chat.system.transform": async (hi, ho) => {
-      const bySkill = hi.sessionID ? sessions.get(hi.sessionID) : undefined
-      if (!bySkill) return
-      for (const [skillId, skillMd] of bySkill) {
-        if (!skillMd) continue
-        ho.system.push(`<skill_instructions skill="${skillId}">\n${skillMd}\n</skill_instructions>`)
       }
     },
 

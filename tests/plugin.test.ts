@@ -73,7 +73,7 @@ describe("tool.execute.after @ prepare-skill", () => {
     expect(JSON.parse(rejected.content[0].text).ok).toBe(false)
   })
 
-  test("registers dynamic MCP via client.mcp.add and rewrites the tool result", async () => {
+  test("registers dynamic MCP via client.mcp.add and rewrites to native <skill_content> form", async () => {
     const { fake, hooks } = await setup()
     const output = payloadResult(validPayload)
     await hooks["tool.execute.after"]({ tool: PREPARE, sessionID: "ses_c", callID: "c" }, output as any)
@@ -86,11 +86,14 @@ describe("tool.execute.after @ prepare-skill", () => {
     expect(add.config.oauth).toBe(false)
     expect(add.config.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/mcp\/weather$/)
 
-    // 返回改写为短确认：含工具名、不含 SKILL.md 全文与 mcpJson schema
+    // 返回改写为原生技能同构形态：SKILL.md 全文 + 已挂载工具清单，留在对话历史
     const text = output.content[0].text
-    expect(text).toContain("skill-weather_get_weather")
-    expect(text).not.toContain("# Weather skill")
-    expect(text).not.toContain("inputSchema")
+    expect(text).toContain('<skill_content name="weather">')
+    expect(text).toContain("# Skill: weather")
+    expect(text).toContain("# Weather skill") // SKILL.md 原文（validPayload 的 skillMd）
+    expect(text).toContain("- `skill-weather_get_weather`: Get current weather for a city")
+    expect(text).toContain("</skill_content>")
+    expect(text).not.toContain("inputSchema") // mcpJson schema 仍不进对话
   })
 
   test("rewrites result with failure message when mcp.add throws", async () => {
@@ -103,21 +106,5 @@ describe("tool.execute.after @ prepare-skill", () => {
     await hooks["tool.execute.after"]({ tool: PREPARE, sessionID: "ses_d", callID: "c" }, output as any)
     expect(output.content[0].text).toContain("failed to register")
     expect(output.content[0].text).toContain("boom")
-  })
-})
-
-describe("experimental.chat.system.transform", () => {
-  test("injects <skill_instructions> only for sessions that prepared", async () => {
-    const { hooks } = await setup()
-    // ses_c 在上一组用例中已 prepare（模块单例状态）
-    const output = { system: [] as string[] }
-    await hooks["experimental.chat.system.transform"]({ sessionID: "ses_c" } as any, output as any)
-    expect(output.system).toHaveLength(1)
-    expect(output.system[0]).toContain('<skill_instructions skill="weather">')
-    expect(output.system[0]).toContain("skill-weather_get_weather")
-
-    const other = { system: [] as string[] }
-    await hooks["experimental.chat.system.transform"]({ sessionID: "ses_unknown" } as any, other as any)
-    expect(other.system).toHaveLength(0)
   })
 })
