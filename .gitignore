@@ -1,0 +1,9 @@
+# 依赖（宿主启动时会按 .opencode/package.json 自动安装，产物不入库）
+node_modules/
+# 宿主自动生成的锁文件与自动改写产物（1.19.5 会自动向 package.json 追加自身版本，属环境产物）
+demo/.opencode/package-lock.json
+demo/.opencode/bun.lock
+# 杂项
+.DS_Store
+*.log
+/tmp/
